@@ -3,7 +3,7 @@ const cors = require("cors");
 const puppeteer = require("puppeteer");
 
 const app = express();
-const PORT = 3000;
+const PORT = process.env.PORT || 3000;
 
 app.use(cors());
 app.use(express.json());
@@ -20,7 +20,7 @@ async function tryClick(page, selectors) {
         await el.click();
         return selector;
       }
-    } catch (_) {}
+    } catch (e) {}
   }
   return null;
 }
@@ -32,73 +32,49 @@ async function tryType(page, selectors, value) {
       if (el) {
         await page.click(selector, { clickCount: 3 });
         await page.keyboard.press("Backspace");
-        await page.type(selector, value, { delay: 25 });
+        await page.type(selector, value, { delay: 20 });
         return selector;
       }
-    } catch (_) {}
+    } catch (e) {}
   }
   return null;
 }
 
 async function extractDownloadLinks(page) {
   return await page.evaluate(() => {
-    const anchors = Array.from(document.querySelectorAll("a[href]"));
+    const anchors = [...document.querySelectorAll("a[href]")];
+    const data = anchors.map(a => ({
+      href: a.href,
+      text: (a.innerText || a.textContent || "").trim()
+    }));
 
-    const results = anchors
-      .map((a) => {
-        const href = a.href || "";
-        const text = (a.innerText || a.textContent || "").trim();
-        return { href, text };
-      })
-      .filter((item) => {
-        if (!item.href) return false;
+    const filtered = data.filter(item => {
+      const h = (item.href || "").toLowerCase();
+      const t = (item.text || "").toLowerCase();
+      return h.startsWith("http") && (
+        t.includes("download") ||
+        t.includes("تحميل") ||
+        t.includes("mp4") ||
+        t.includes("mp3") ||
+        h.includes(".mp4") ||
+        h.includes(".mp3") ||
+        h.includes("download")
+      );
+    });
 
-        const h = item.href.toLowerCase();
-        const t = item.text.toLowerCase();
-
-        return (
-          h.startsWith("http") &&
-          (
-            t.includes("download") ||
-            t.includes("تحميل") ||
-            t.includes("mp4") ||
-            t.includes("mp3") ||
-            h.includes(".mp4") ||
-            h.includes(".mp3") ||
-            h.includes("download")
-          )
-        );
-      });
-
-    const unique = [];
-    const seen = new Set();
-
-    for (const item of results) {
-      if (!seen.has(item.href)) {
-        seen.add(item.href);
-        unique.push(item);
-      }
-    }
-
-    return unique;
+    return [...new Map(filtered.map(x => [x.href, x])).values()];
   });
 }
 
 app.get("/", (req, res) => {
-  res.json({
-    ok: true,
-    message: "TikTok downloader backend is running"
-  });
+  res.json({ ok: true, message: "TikTok downloader backend is running" });
 });
 
 app.post("/api/tiktok-download", async (req, res) => {
   const { url } = req.body || {};
 
   if (!url || !isValidTikTokUrl(url)) {
-    return res.status(400).json({
-      ok: false,
-      message: "رابط تيك توك غير صالح"
-    });
+    return res.status(400).json({ ok: false, message: "رابط تيك توك غير صالح" });
   }
 
   let browser;
@@ -114,7 +90,6 @@ app.post("/api/tiktok-download", async (req, res) => {
     });
 
     const page = await browser.newPage();
-
     await page.setViewport({ width: 1366, height: 900 });
 
     await page.goto("https://savetik.app/ar", {
@@ -134,50 +109,39 @@ app.post("/api/tiktok-download", async (req, res) => {
 
     const buttonSelectors = [
       'button[type="submit"]',
-      'button',
       'input[type="submit"]',
       '.btn',
       '.search-btn',
-      '.download-btn'
+      '.download-btn',
+      'button'
     ];
 
-    const typedSelector = await tryType(page, inputSelectors, url);
+    const typed = await tryType(page, inputSelectors, url);
 
-    if (!typedSelector) {
-      return res.status(500).json({
-        ok: false,
-        message: "لم يتم العثور على حقل الإدخال داخل الصفحة"
-      });
+    if (!typed) {
+      return res.status(500).json({ ok: false, message: "لم يتم العثور على حقل الإدخال" });
     }
 
-    await page.waitForTimeout(1000);
+    await new Promise(r => setTimeout(r, 1500));
 
-    const clickedSelector = await tryClick(page, buttonSelectors);
-
-    if (!clickedSelector) {
+    const clicked = await tryClick(page, buttonSelectors);
+    if (!clicked) {
       await page.keyboard.press("Enter");
     }
 
-    await page.waitForTimeout(5000);
+    await new Promise(r => setTimeout(r, 6000));
 
     let links = await extractDownloadLinks(page);
 
     if (!links.length) {
-      await page.waitForTimeout(5000);
+      await new Promise(r => setTimeout(r, 5000));
       links = await extractDownloadLinks(page);
     }
 
     if (!links.length) {
-      const html = await page.content();
-
       return res.status(404).json({
         ok: false,
-        message: "لم يتم العثور على روابط تحميل. قد يكون الموقع غيّر تصميمه أو أضاف حماية.",
-        debug: {
-          usedInputSelector: typedSelector,
-          usedButtonSelector: clickedSelector || "ENTER",
-          htmlSnippet: html.slice(0, 2000)
-        }
+        message: "لم يتم العثور على روابط تحميل"
       });
     }
 
@@ -190,16 +154,14 @@ app.post("/api/tiktok-download", async (req, res) => {
   } catch (error) {
     return res.status(500).json({
       ok: false,
-      message: "حدث خطأ أثناء معالجة الرابط",
+      message: "حدث خطأ أثناء المعالجة",
       error: error.message
     });
   } finally {
-    if (browser) {
-      await browser.close();
-    }
+    if (browser) await browser.close();
   }
 });
 
 app.listen(PORT, () => {
-  console.log(`Server running on http://localhost:${PORT}`);
+  console.log(`Server running on port ${PORT}`);
 });
